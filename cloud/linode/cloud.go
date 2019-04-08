@@ -70,6 +70,10 @@ func newCloud() (cloudprovider.Interface, error) {
 	}
 	linodeClient.SetUserAgent(fmt.Sprintf("linode-cloud-controller-manager %s", linodego.DefaultUserAgent))
 
+	lb, err := newLoadbalancers(&linodeClient, region)
+	if err != nil {
+		return nil, err
+	}
 	// Return struct that satisfies cloudprovider.Interface
 	return &linodeCloud{
 		client:        &linodeClient,
