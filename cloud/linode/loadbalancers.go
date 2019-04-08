@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"strconv"
 	"strings"
 
@@ -20,25 +23,15 @@ const (
 	// is overwritten to https. Options are tcp, http and https. Defaults to tcp.
 	annLinodeProtocol = "service.beta.kubernetes.io/linode-loadbalancer-protocol"
 
-	// annLinodeTLSPorts is the annotation used to specify which ports of the loadbalancer
-	// should use the https protocol. This is a comma separated list of ports
-	// (e.g. 443,6443,7443).
-	annLinodeTLSPorts = "service.beta.kubernetes.io/linode-loadbalancer-tls-ports"
-
 	annLinodeCheckPath       = "service.beta.kubernetes.io/linode-loadbalancer-check-path"
 	annLinodeCheckBody       = "service.beta.kubernetes.io/linode-loadbalancer-check-body"
 	annLinodeHealthCheckType = "service.beta.kubernetes.io/linode-loadbalancer-check-type"
-
-	// annLinodeCertificateID is the annotation specifying the certificate ID
-	// used for https protocol. This annotation is required if annLinodeTLSPorts
-	// is passed.
-	annLinodeSSLCertificate = "service.beta.kubernetes.io/linode-loadbalancer-ssl-cert"
-	annLinodeSSLKey         = "service.beta.kubernetes.io/linode-loadbalancer-ssl-key"
 
 	annLinodeHealthCheckInterval = "service.beta.kubernetes.io/linode-loadbalancer-check-interval"
 	annLinodeHealthCheckTimeout  = "service.beta.kubernetes.io/linode-loadbalancer-check-timeout"
 	annLinodeHealthCheckAttempts = "service.beta.kubernetes.io/linode-loadbalancer-check-attempts"
 	annLinodeHealthCheckPassive  = "service.beta.kubernetes.io/linode-loadbalancer-check-passive"
+	annLinodeLoadBalancerTLS     = "service.beta.kubernetes.io/linode-loadbalancer-tls "
 
 	annLinodeSessionPersistence = "service.beta.kubernetes.io/linode-loadbalancer-stickiness"
 
@@ -58,6 +51,13 @@ var lbNotFound = errors.New("loadbalancer not found")
 type loadbalancers struct {
 	client *linodego.Client
 	zone   string
+
+	kubeClient kubernetes.Interface
+}
+
+type tlsAnnotation struct {
+	TlsSecretName string `json:"tls_secret_name"`
+	Port          int    `json:"port"`
 }
 
 // newLoadbalancers returns a cloudprovider.LoadBalancer whose concrete type is a *loadbalancer.
@@ -346,20 +346,17 @@ func (l *loadbalancers) buildNodeBalancerConfig(service *v1.Service, port int) (
 	config.CheckPassive = checkPassive
 
 	if protocol == linodego.ProtocolHTTPS {
+		if err = l.retrieveKubeClient(); err != nil {
+			return config, err
+		}
 		isTLS, err := isTLSPort(service, port)
 		if err != nil {
 			return config, err
 		}
 		if isTLS {
-			cert, key := getSSLCertInfo(service)
-			if cert == "" && key == "" {
-				return config, fmt.Errorf("must set %v and %v annotation for https protocol", annLinodeSSLCertificate, annLinodeSSLKey)
-			}
-			if cert != "" {
-				config.SSLCert = cert
-			}
-			if key != "" {
-				config.SSLKey = key
+			config.SSLCert, config.SSLKey, err = getTLSCertInfo(service, l.kubeClient, port)
+			if err != nil {
+				return config, err
 			}
 		}
 	}
@@ -402,6 +399,19 @@ func (l *loadbalancers) buildNodeBalancerNodeCreateOptions(node *v1.Node, nodePo
 	}
 }
 
+func (l *loadbalancers) retrieveKubeClient() error {
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+
+	l.kubeClient, err = kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // getProtocol returns the desired protocol of service.
 func getProtocol(service *v1.Service) (linodego.ConfigProtocol, error) {
 	protocol, ok := service.Annotations[annLinodeProtocol]
@@ -442,24 +452,29 @@ func isTLSPort(service *v1.Service, port int) (bool, error) {
 
 // getTLSPorts returns the ports of service that are set to use TLS.
 func getTLSPorts(service *v1.Service) ([]int, error) {
-	tlsPorts, ok := service.Annotations[annLinodeTLSPorts]
-	if !ok {
-		return nil, nil
+	tlsAnnotations, err := getTLSAnnotations(service)
+	if err != nil {
+		return nil, err
 	}
-
-	tlsPortsSlice := strings.Split(tlsPorts, ",")
-
-	tlsPortsInt := make([]int, len(tlsPortsSlice))
-	for i, tlsPort := range tlsPortsSlice {
-		port, err := strconv.Atoi(tlsPort)
-		if err != nil {
-			return nil, err
-		}
-
-		tlsPortsInt[i] = port
+	tlsPortsInt := make([]int, len(tlsAnnotations))
+	for i, tlsAnnotation := range tlsAnnotations {
+		tlsPortsInt[i] = tlsAnnotation.Port
 	}
 
 	return tlsPortsInt, nil
+}
+
+func getTLSAnnotations(service *v1.Service) ([]*tlsAnnotation, error) {
+	annotationJSON, ok := service.Annotations[annLinodeLoadBalancerTLS]
+	if !ok {
+		return nil, fmt.Errorf("annotation %v must be specified", annLinodeLoadBalancerTLS)
+	}
+	tlsAnnotations := make([]*tlsAnnotation, 0)
+	err := json.Unmarshal([]byte(annotationJSON), &tlsAnnotations)
+	if err != nil {
+		return nil, err
+	}
+	return tlsAnnotations, nil
 }
 
 func getNodeInternalIp(node *v1.Node) string {
@@ -503,18 +518,38 @@ func getStickiness(service *v1.Service) linodego.ConfigStickiness {
 	}
 }
 
-func getSSLCertInfo(service *v1.Service) (string, string) {
-	cert := service.Annotations[annLinodeSSLCertificate]
-	if cert != "" {
-		cb, _ := base64.StdEncoding.DecodeString(cert)
-		cert = strings.TrimSpace(string(cb))
+func getTLSCertInfo(service *v1.Service, kubeClient kubernetes.Interface, port int) (string, string, error) {
+	tlsAnnotations, err := getTLSAnnotations(service)
+	if err != nil {
+		return "", "", err
 	}
-	key := service.Annotations[annLinodeSSLKey]
-	if key != "" {
-		kb, _ := base64.StdEncoding.DecodeString(key)
-		key = strings.TrimSpace(string(kb))
+
+	for _, tlsAnnotation := range tlsAnnotations {
+		if tlsAnnotation.Port == port {
+			secret, err := kubeClient.CoreV1().Secrets(v1.NamespaceDefault).Get(tlsAnnotation.TlsSecretName, metav1.GetOptions{})
+			if err != nil {
+				return "", "", err
+			}
+
+			cert := string(secret.Data[v1.TLSCertKey])
+			cb, err := base64.StdEncoding.DecodeString(cert)
+			if err != nil {
+				return "", "", err
+			}
+			cert = strings.TrimSpace(string(cb))
+
+			key := string(secret.Data[v1.TLSPrivateKeyKey])
+			kb, err := base64.StdEncoding.DecodeString(key)
+			if err != nil {
+				return "", "", err
+			}
+			key = strings.TrimSpace(string(kb))
+
+			return cert, key, nil
+		}
 	}
-	return cert, key
+
+	return "", "", fmt.Errorf("cert & key for port %v is not specified in annotation %v", port, annLinodeLoadBalancerTLS)
 }
 
 func getConnectionThrottle(service *v1.Service) int {
