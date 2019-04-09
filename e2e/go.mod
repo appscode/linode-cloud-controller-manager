@@ -24,5 +24,6 @@ require (
 	k8s.io/apimachinery v0.0.0-20180621070125-103fd098999d
 	k8s.io/client-go v8.0.0+incompatible
 	k8s.io/klog v0.2.0 // indirect
+	k8s.io/kubernetes v1.14.0
 	k8s.io/utils v0.0.0-20190308190857-21c4ce38f2a7 // indirect
 )

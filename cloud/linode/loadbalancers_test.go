@@ -3,15 +3,14 @@ package linode
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
-	"testing"
-
 	"github.com/linode/linodego"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"testing"
 )
 
 func TestCCMLoadBalancers(t *testing.T) {
@@ -342,47 +341,6 @@ func Test_getConnectionThrottle(t *testing.T) {
 
 			if test.expected != connThrottle {
 				t.Fatalf("expected throttle value (%d) does not match actual value (%d)", test.expected, connThrottle)
-			}
-		})
-	}
-}
-
-func Test_getTLSPorts(t *testing.T) {
-	testcases := []struct {
-		name     string
-		service  *v1.Service
-		tlsPorts []int
-		err      error
-	}{
-		{
-			"tls port specified",
-			&v1.Service{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: randString(10),
-					UID:  "abc123",
-					Annotations: map[string]string{
-						annLinodeLoadBalancerTLS: `[ { "tls_secret_name": "prod-app-tls", "port": 443} ]`,
-					},
-				},
-			},
-			[]int{443},
-			nil,
-		},
-	}
-
-	for _, test := range testcases {
-		t.Run(test.name, func(t *testing.T) {
-			tlsPorts, err := getTLSPorts(test.service)
-			if !reflect.DeepEqual(tlsPorts, test.tlsPorts) {
-				t.Error("unexpected TLS ports")
-				t.Logf("expected %v", test.tlsPorts)
-				t.Logf("actual: %v", tlsPorts)
-			}
-
-			if !reflect.DeepEqual(err, test.err) {
-				t.Error("unexpected error")
-				t.Logf("expected: %v", test.err)
-				t.Logf("actual: %v", err)
 			}
 		})
 	}

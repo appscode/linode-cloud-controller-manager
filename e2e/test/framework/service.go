@@ -12,11 +12,12 @@ import (
 	"time"
 )
 
-func (i *lbInvocation) CreateService(selector map[string]string) error {
+func (i *lbInvocation) CreateService(selector map[string]string, annotations map[string]string) error {
 	_, err := i.kubeClient.CoreV1().Services(i.Namespace()).Create(&core.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      testServerResourceName,
-			Namespace: i.Namespace(),
+			Name:        testServerResourceName,
+			Namespace:   i.Namespace(),
+			Annotations: annotations,
 			Labels: map[string]string{
 				"app": "test-server-" + i.app,
 			},

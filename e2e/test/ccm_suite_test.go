@@ -78,7 +78,7 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	if dlt || !useExisting{
+	if dlt || !useExisting {
 		err := framework.DeleteCluster(ClusterName)
 		Expect(err).NotTo(HaveOccurred())
 	}

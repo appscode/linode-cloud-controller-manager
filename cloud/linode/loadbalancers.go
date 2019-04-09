@@ -2,7 +2,6 @@ package linode
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +30,7 @@ const (
 	annLinodeHealthCheckTimeout  = "service.beta.kubernetes.io/linode-loadbalancer-check-timeout"
 	annLinodeHealthCheckAttempts = "service.beta.kubernetes.io/linode-loadbalancer-check-attempts"
 	annLinodeHealthCheckPassive  = "service.beta.kubernetes.io/linode-loadbalancer-check-passive"
-	annLinodeLoadBalancerTLS     = "service.beta.kubernetes.io/linode-loadbalancer-tls "
+	annLinodeLoadBalancerTLS     = "service.beta.kubernetes.io/linode-loadbalancer-tls"
 
 	annLinodeSessionPersistence = "service.beta.kubernetes.io/linode-loadbalancer-stickiness"
 
@@ -56,7 +55,7 @@ type loadbalancers struct {
 }
 
 type tlsAnnotation struct {
-	TlsSecretName string `json:"tls_secret_name"`
+	TlsSecretName string `json:"tls-secret-name"`
 	Port          int    `json:"port"`
 }
 
@@ -346,22 +345,38 @@ func (l *loadbalancers) buildNodeBalancerConfig(service *v1.Service, port int) (
 	config.CheckPassive = checkPassive
 
 	if protocol == linodego.ProtocolHTTPS {
-		if err = l.retrieveKubeClient(); err != nil {
+		if err = l.processHTTPS(service, &config, port); err != nil {
 			return config, err
-		}
-		isTLS, err := isTLSPort(service, port)
-		if err != nil {
-			return config, err
-		}
-		if isTLS {
-			config.SSLCert, config.SSLKey, err = getTLSCertInfo(service, l.kubeClient, port)
-			if err != nil {
-				return config, err
-			}
 		}
 	}
 
 	return config, nil
+}
+
+func (l *loadbalancers) processHTTPS(service *v1.Service, nbConfig *linodego.NodeBalancerConfig, port int) error  {
+	if err := l.retrieveKubeClient(); err != nil {
+		return  err
+	}
+	tlsAnnotations, err := getTLSAnnotations(service)
+	if err != nil {
+		return  err
+	}
+
+	tlsPorts, err := getTLSPorts(tlsAnnotations)
+	if err != nil {
+		return  err
+	}
+	isTLS, err := isTLSPort(tlsPorts, port)
+	if err != nil {
+		return  err
+	}
+	if isTLS {
+		nbConfig.SSLCert, nbConfig.SSLKey, err = getTLSCertInfo(l.kubeClient, tlsAnnotations, service.Namespace, port)
+		if err != nil {
+			return  err
+		}
+	}
+	return nil
 }
 
 // buildLoadBalancerRequest returns a linodego.NodeBalancer
@@ -437,11 +452,7 @@ func getHealthCheckType(service *v1.Service) (linodego.ConfigCheck, error) {
 	return linodego.ConfigCheck(hType), nil
 }
 
-func isTLSPort(service *v1.Service, port int) (bool, error) {
-	tlsPortsSlice, err := getTLSPorts(service)
-	if err != nil {
-		return false, err
-	}
+func isTLSPort(tlsPortsSlice []int, port int) (bool, error) {
 	for _, tlsPort := range tlsPortsSlice {
 		if port == tlsPort {
 			return true, nil
@@ -451,14 +462,10 @@ func isTLSPort(service *v1.Service, port int) (bool, error) {
 }
 
 // getTLSPorts returns the ports of service that are set to use TLS.
-func getTLSPorts(service *v1.Service) ([]int, error) {
-	tlsAnnotations, err := getTLSAnnotations(service)
-	if err != nil {
-		return nil, err
-	}
-	tlsPortsInt := make([]int, len(tlsAnnotations))
-	for i, tlsAnnotation := range tlsAnnotations {
-		tlsPortsInt[i] = tlsAnnotation.Port
+func getTLSPorts(tlsAnnotations []*tlsAnnotation) ([]int, error) {
+	tlsPortsInt := make([]int, 0)
+	for _, tlsAnnotation := range tlsAnnotations {
+		tlsPortsInt = append(tlsPortsInt, tlsAnnotation.Port)
 	}
 
 	return tlsPortsInt, nil
@@ -518,32 +525,20 @@ func getStickiness(service *v1.Service) linodego.ConfigStickiness {
 	}
 }
 
-func getTLSCertInfo(service *v1.Service, kubeClient kubernetes.Interface, port int) (string, string, error) {
-	tlsAnnotations, err := getTLSAnnotations(service)
-	if err != nil {
-		return "", "", err
-	}
-
+func getTLSCertInfo(kubeClient kubernetes.Interface, tlsAnnotations []*tlsAnnotation, namespace string, port int) (string, string, error) {
 	for _, tlsAnnotation := range tlsAnnotations {
 		if tlsAnnotation.Port == port {
-			secret, err := kubeClient.CoreV1().Secrets(v1.NamespaceDefault).Get(tlsAnnotation.TlsSecretName, metav1.GetOptions{})
+			secret, err := kubeClient.CoreV1().Secrets(namespace).Get(tlsAnnotation.TlsSecretName, metav1.GetOptions{})
 			if err != nil {
 				return "", "", err
 			}
 
 			cert := string(secret.Data[v1.TLSCertKey])
-			cb, err := base64.StdEncoding.DecodeString(cert)
-			if err != nil {
-				return "", "", err
-			}
-			cert = strings.TrimSpace(string(cb))
+			cert = strings.TrimSpace(cert)
 
 			key := string(secret.Data[v1.TLSPrivateKeyKey])
-			kb, err := base64.StdEncoding.DecodeString(key)
-			if err != nil {
-				return "", "", err
-			}
-			key = strings.TrimSpace(string(kb))
+
+			key = strings.TrimSpace(key)
 
 			return cert, key, nil
 		}
