@@ -2,7 +2,9 @@ package test
 
 import (
 	"e2e_test/test/framework"
+	"fmt"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -31,6 +33,7 @@ var _ = Describe("CloudControllerManager", func() {
 		annLinodeHealthCheckTimeout  = "service.beta.kubernetes.io/linode-loadbalancer-check-timeout"
 		annLinodeHealthCheckAttempts = "service.beta.kubernetes.io/linode-loadbalancer-check-attempts"
 		annLinodeHealthCheckPassive  = "service.beta.kubernetes.io/linode-loadbalancer-check-passive"
+		annLinodeThrottle            = "service.beta.kubernetes.io/linode-loadbalancer-throttle"
 	)
 
 	BeforeEach(func() {
@@ -157,6 +160,26 @@ var _ = Describe("CloudControllerManager", func() {
 		}
 
 		checkNumberOfUpNodes(2)
+	}
+
+	var checkThrottle = func(throttle string) {
+		checkNumberOfUpNodes(2)
+
+		By("Getting NodeBalancer Information")
+		nb, err := f.LoadBalancer.GetNodeBalancer(framework.TestServerResourceName)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("Checking the Number of Throttle Connection")
+		intThrottle, err := strconv.Atoi(throttle)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nb.ClientConnThrottle == intThrottle).Should(BeTrue())
+	}
+
+	var getHTTPStatus = func(link string) int {
+		resp, err := http.Get(link)
+		Expect(err).NotTo(HaveOccurred())
+		fmt.Println(resp.StatusCode)
+		return resp.StatusCode
 	}
 
 	var addNewNode = func() {
@@ -790,6 +813,66 @@ var _ = Describe("CloudControllerManager", func() {
 				It("should successfully check the health of 2 nodes", func() {
 					By("Checking NodeBalancer Configurations")
 					checkNodeBalancerConfig(checkType, path, "", "", "", "", "")
+				})
+			})
+
+			FContext("For Service with Throttle Enabled", func() {
+				var (
+					pods        []string
+					labels      map[string]string
+					annotations map[string]string
+
+					throttle = "1"
+				)
+				BeforeEach(func() {
+					pods = []string{"test-pod"}
+					ports := []core.ContainerPort{
+						{
+							Name:          "http",
+							ContainerPort: 80,
+						},
+					}
+					servicePorts := []core.ServicePort{
+						{
+							Name:       "http",
+							Port:       80,
+							TargetPort: intstr.FromInt(80),
+							Protocol:   "TCP",
+						},
+					}
+
+					labels = map[string]string{
+						"app": "test-loadbalancer",
+					}
+					annotations = map[string]string{
+						annLinodeThrottle: throttle,
+					}
+
+					By("Creating Pod")
+					createPodWithLabel(pods, ports, "fahimabrar/test-server", labels, false)
+
+					By("Creating Service")
+					createServiceWithAnnotations(labels, annotations, servicePorts, false)
+				})
+
+				AfterEach(func() {
+					/*By("Deleting the Pods")
+					deletePods(pods)
+
+					By("Deleting the Service")
+					deleteService()*/
+				})
+
+				It("should successfully check the number of throttle connection", func() {
+					By("Checking NodeBalancer Throttle")
+					checkThrottle(throttle)
+
+					By("Getting LoadBalancer URL")
+					eps, err := f.LoadBalancer.GetHTTPEndpoints()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(len(eps)).Should(BeNumerically(">=", 1))
+
+					//TODO: check for 429
 				})
 			})
 		})
